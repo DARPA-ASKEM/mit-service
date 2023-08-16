@@ -1,18 +1,15 @@
-import asyncio
+import locale
 import copy
 from collections import OrderedDict
-import io
 import json
 import os
 import re
 import time
+from typing import Any, List
 
 import pandas as pd
-from cryptography.fernet import Fernet
 import openai
 from openai import OpenAIError
-from PIL import Image
-import gpt_interaction
 from tqdm import tqdm
 import ast
 import sys
@@ -24,6 +21,8 @@ from gpt_key import *
 # from automates.program_analysis.JSON2GroMEt.json2gromet import json_to_gromet
 # from automates.gromet.query import query
 
+locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
+
 def index_text_path(text_path: str) -> str:
     fw = open(text_path + "_idx", "w")
     with open(text_path) as fp:
@@ -34,7 +33,7 @@ def index_text_path(text_path: str) -> str:
 
 def index_text(text: str) -> str:
     idx_text = ""
-    tlist = text.split('\n')
+    tlist = text.splitlines()
     # print(tlist)
     for i, line in enumerate(tlist):
         if i==len(tlist)-1 and line== "":
@@ -223,24 +222,28 @@ def get_code_dataset_prompt(code, dataset, target):
     return prompt
 
 
-def get_csv_doc_prompt(csv, doc):
+def get_csv_doc_prompt(schema, stats, doc, dataset_name, doc_name):
     text_file = open(os.path.join(os.path.dirname(__file__), "prompts/dataset_profiling_prompt.txt"), "r")
     prompt = text_file.read()
     text_file.close()
 
-    prompt = prompt.replace("[CSV]", csv)
+    prompt = prompt.replace("[SCHEMA]", schema)
+    prompt = prompt.replace("[STATS]", json.dumps(stats))
     prompt = prompt.replace("[DOC]", doc)
+    prompt = prompt.replace("[DATASET_NAME]", dataset_name)
+    prompt = prompt.replace("[DOC_NAME]", doc_name)
     # print(prompt)
     return prompt
 
-def get_data_card_prompt(fields, csv, doc):
+def get_data_card_prompt(fields, doc, dataset_name, doc_name):
     with open(os.path.join(os.path.dirname(__file__), "prompts/data_card_prompt.txt"), "r") as text_file:
         prompt = text_file.read()
 
     fields_str = '\n'.join([f"{f[0]}: {f[1]}" for f in fields])
     prompt = prompt.replace("[FIELDS]", fields_str)
-    prompt = prompt.replace("[CSV]", csv)
     prompt = prompt.replace("[DOC]", doc)
+    prompt = prompt.replace("[DATASET_NAME]", dataset_name)
+    prompt = prompt.replace("[DOC_NAME]", doc_name)
     return prompt
 
 def get_model_card_prompt(fields, text, code):
@@ -310,7 +313,7 @@ def ontology_code_connection():
 def code_text_connection(code, text, gpt_key, interactive = False):
     code_str = code
     idx_text = index_text(text)
-    tlist = text.split("\n")
+    tlist = text.splitlines()
     targets = extract_func_names(code_str)
     print(f"TARGETS: {targets}")
     tups = []
@@ -373,7 +376,7 @@ def rank_dkg_terms(target, concepts, gpt_key):
     """
     prompt = get_rank_dkg_prompt(json.dumps(target), json.dumps(concepts))
     match = get_gpt4_match(prompt, gpt_key, model="gpt-4")
-    rank = match.split("\n")
+    rank = match.splitlines()
     sorted = sort_dkg(rank, concepts)
     return sorted, True
 
@@ -390,18 +393,41 @@ def sort_dkg(ranking, json_obj):
 
     return sorted_json
 
-def dataset_header_dkg(header, gpt_key=''):
+
+async def profile_matrix(data: List[List[Any]], doc, dataset_name, doc_name, gpt_key='', smart=False):
+    """
+    Grounding a matrix of data to DKG terms
+    """
+    if not data:
+        return f"Empty dataset input", False
+
+    if not all(all(isinstance(x, (int, float)) for x in row) for row in data):
+        return f"Matrix data must be all-numeric. Data was: {data}", False
+
+    # for matrices, we compute statistics across the entire matrix
+    df = pd.DataFrame(data)
+    df = df.stack()
+    stats = {
+        "mean": df.mean(),
+        "std": df.std(),
+        "min": df.min(),
+        "max": df.max(),
+        "quantile_25": df.quantile(0.25),
+        "quantile_50": df.quantile(0.5),
+        "quantile_75": df.quantile(0.75),
+        "num_null_entries": int(df.isnull().sum()),
+        "type": "numeric",
+    }
+
+    return json.dumps({'matrix_stats': stats}), True
+
+def dataset_header_dkg(cols, gpt_key=''):
     """
     Grounding the column header to DKG terms
-    :param header: Dataset header string seperated with comma
+    :param cols: List of column names
     :return: Matches column name to DKG
     """
-    if header=="":
-        return f"Empty dataset input", False
-    row1 = header.split("\n")[0]
-    cols = row1.split(",")
     col_ant = {}
-
     for col in cols:
         print(f"looking up {col}")
         results = []
@@ -417,6 +443,7 @@ def dataset_header_dkg(header, gpt_key=''):
         print(f"relevant items found from GPT: {ans}")
         for e in ans.split(","):
             # print(e)
+            e = e.strip()
             for res in get_mira_dkg_term(e, ['id', 'name', 'type'],True):
                 # print(res)
                 if not res:
@@ -428,87 +455,177 @@ def dataset_header_dkg(header, gpt_key=''):
     return json.dumps(col_ant), True
 
 
-async def dataset_header_document_dkg(header, doc,  gpt_key=''):
+from kgmatching import local_batch_get_mira_dkg_term
+
+async def dataset_header_document_dkg(data, doc, dataset_name, doc_name, gpt_key='', smart=False):
     """
-    Grounding the column header to DKG terms
-    :param header: Dataset header string seperated with comma
+    Grounding a dataset to a DKG
+    :param data: Dataset as a list of lists, including header and optionally a few rows
     :param doc: Document string
+    :param dataset_name: Name of dataset
+    :param doc_name: Name of document
+    :param gpt_key: OpenAI API key
     :return: Matches column name to DKG
     """
-    if header=="":
+    if not data:
         return f"Empty dataset input", False
-    row1 = header.split("\n")[0]
-    cols = row1.split(",")
-    col_ant = {}
+    header = data[0]
+    data = data[1:]
+    schema = ','.join(header)
 
-    prompt = get_csv_doc_prompt(header,doc)
+    print("Getting stats")
+    stats = await _compute_tabular_statistics(data, header=header)
+
+    col_ant = OrderedDict()
+
+    prompt = get_csv_doc_prompt(schema, stats, doc, dataset_name, doc_name)
     match = get_gpt4_match(prompt, gpt_key, model="gpt-4")
+    print("Got match")
     print(match)
-    for res in match.split("\n"):
-        if res == "":
-            continue
-        attrs = res.split("|")
-        col = attrs[0]
+    match = match.split('```')
+    if len(match) == 1:
+        match = match[0]
+    else:
+        match = match[1]
+    results = [s.strip() for s in match.splitlines()]
+    results = [s for s in results if s]
+    results = [[x.strip() for x in s.split("|")] for s in results]
+    results = [x for x in results if len(x) == 4]
+    if len(results) != len(header):
+        return f"Got different number of results ({len(results)}) than columns ({len(header)})", False
+
+    for res, col in zip(results, header):
         col_ant[col] = {}
-        col_ant[col]["col_name"] = attrs[0]
-        col_ant[col]["concept"] = attrs[1]
-        col_ant[col]["unit"] = attrs[2]
-        col_ant[col]["description"] = attrs[3]
+        col_ant[col]["col_name"] = res[0]
+        col_ant[col]["concept"] = res[1]
+        col_ant[col]["unit"] = res[2]
+        col_ant[col]["description"] = res[3]
 
+    col_names = list(col_ant.keys())
+    col_concepts = [col_ant[col]["concept"] for col in col_ant]
+    col_descriptions = [col_ant[col]["description"] for col in col_ant]
 
-    print(f"Looking up column names and concepts in mira: {cols}")
-    col_names = [col_ant[col]["col_name"] for col in cols]
-    col_concepts = [col_ant[col]["concept"] for col in cols]
+    terms = [ f'{col_name}: {col_concept} {col_description}' for (col_name, col_concept, col_description) in zip(col_names, col_concepts, col_descriptions) ]
+    matches0 = local_batch_get_mira_dkg_term(terms)
+    matches = [[[res['id'], res['name'], res['type']] for res in batch] for batch in matches0]
+    # # line up coroutines
+    # ops = [abatch_get_mira_dkg_term(col_names, ['id', 'name', 'type'], True),
+    #        abatch_get_mira_dkg_term(col_concepts, ['id', 'name', 'type'], True),
+    #        ]
+    # # let them all finish
+    # name_results, concept_results = await asyncio.gather(*ops)
 
-    ops = [abatch_get_mira_dkg_term(col_names, ['id', 'name', 'type'], True),
-           abatch_get_mira_dkg_term(col_concepts, ['id', 'name', 'type'], True)]
-    name_results, concept_results = await asyncio.gather(*ops)
+    for col, match in zip(col_names, matches):
+        col_ant[col]["dkg_groundings"] = match
+        if smart:
+            target = copy.deepcopy(col_ant[col])
+            del target["dkg_groundings"]
+            res=rank_dkg_terms(target, match, gpt_key)[0]
+            col_ant[col]["dkg_groundings"] = res
+            print(f"Smart grounding for {col}: {res}")
 
-    for col, name_res, concept_res in zip(cols, name_results, concept_results):
-        seen = set()
-        results = []
-        for res in (concept_res, name_res):  # TODO check if this is the right order
-            for r in res:
-                if not r:
-                    break
-                if not r[0] in seen:
-                    results.append(r)
-                    seen.add(r[0])
-
-        col_ant[col]["dkg_groundings"] = results
+    for col in col_ant:
+        col_ant[col]["column_stats"] = stats.get(col, {})
 
     return json.dumps(col_ant), True
 
 
-async def construct_data_card(data, data_doc,  gpt_key='', fields=None, model="gpt-3.5-turbo"):
+async def _compute_tabular_statistics(data: List[List[Any]], header):
+    """
+    Compute summary statistics for a given tabular dataset.
+    :param data: Dataset as a list of lists
+    :return: Summary statistics as a dictionary
+    """
+
+    csv_df = pd.DataFrame(data, columns=header)
+    null_counts = csv_df.isnull().sum(axis=0)
+
+    # first handle numeric columns
+    df = csv_df.describe()
+    df.drop('count', inplace=True)  # we don't want the count row
+    # NaN and inf are not json serialiazable, so we replace them with strings
+    df.fillna('NaN', inplace=True)
+    df.replace(float('nan'), 'NaN', inplace=True)  # better safe than sorry
+    df.replace(float('inf'), 'inf', inplace=True)
+    df.replace(float('-inf'), '-inf', inplace=True)
+    res = df.to_dict()
+    key_translations = {f"{x}%": f"quantile_{x}" for x in (25, 50, 75)}
+    for col in res.keys():
+        res[col]['type'] = 'numeric'
+        for k in list(res[col].keys()):
+            if k in key_translations:
+                res[col][key_translations[k]] = res[col].pop(k)
+
+    # try to infer date columns and convert them to datetime objects
+    date_cols = set()
+    df = csv_df.select_dtypes(include=['object'])
+    for col in df.columns:
+        try:
+            df[col] = pd.to_datetime(df[col])
+            date_cols.add(col)
+        except Exception:
+            continue
+
+    # then handle categorical columns, saving the top 10 most common values along with their counts
+    # (also do this for dates)
+    for col in df.columns:
+        res[col] = {'type': 'categorical'}
+        res[col]['most_common_entries'] = {}
+        # get top <=10 most common values along with their counts
+        counts = df[col].value_counts()
+        for i in range(min(10, len(counts))):
+            val = counts.index[i]
+            if col in date_cols:
+                val = val.isoformat()
+            res[col]['most_common_entries'][val] = int(counts[i])
+        # get number of unique entries
+        res[col]['num_unique_entries'] = len(df[col].unique())
+
+        if col in date_cols:
+            res[col]['type'] = 'date'
+            res[col]['earliest'] = df[col].min().isoformat()
+            res[col]['latest'] = df[col].max().isoformat()
+
+    for col in res:
+        res[col]['num_null_entries'] = int(null_counts[col])
+
+    # make sure all column indices are strings
+    res = {str(k): v for k, v in res.items()}
+
+    return res
+
+
+async def construct_data_card(data_doc, dataset_name, doc_name, dataset_type, gpt_key='', model="gpt-3.5-turbo-16k"):
     """
     Constructing a data card for a given dataset and its description.
     :param data: Small dataset, including header and optionally a few rows
     :param data_doc: Document string
     :param gpt_key: OpenAI API key
-    :param fields: Fields to be filled in the data card
     :param model: OpenAI model to use
     :return: Data card
     """
 
-    if fields is None:
-        fields = [("DESCRIPTION",  "Short description of the dataset (1-3 sentences)."),
-                  ("AUTHOR_NAME",  "Name of publishing institution or author."),
-                  ("AUTHOR_EMAIL", "Email address for the author of this dataset."),
-                  ("DATE",         "Date of publication of this dataset."),
-                  ("SCHEMA",       "Schema of the data in this dataset."),
-                  ("PROVENANCE",   "Short (1 sentence) description of how the data was collected."),
-                  ("SENSITIVITY",  "Is there any human-identifying information in the dataset?"),
-                  ("EXAMPLES",     "One example data point from the dataset, formatted as a JSON object."),
-                  ("LICENSE",      "License for this dataset."),
-        ]
+    fields = [("DESCRIPTION",  "Short description of the dataset (1-3 sentences)."),
+              ("AUTHOR_NAME",  "Name of publishing institution or author."),
+              ("AUTHOR_EMAIL", "Email address for the author of this dataset."),
+              ("DATE",         "Date of publication of this dataset."),
+              ("PROVENANCE",   "Short (1 sentence) description of how the data was collected."),
+              ("SENSITIVITY",  "Is there any human-identifying information in the dataset?"),
+              ("LICENSE",      "License for this dataset."),
+    ]
+    if dataset_type == 'no-header':
+        # also want GPT to fill in the schema
+        fields.append(("SCHEMA", "The dataset schema, as a comma-separated list of column names."))
+    elif dataset_type == 'matrix':
+        # instead of a schema, want to ask GPT to explain what a given (row, column) cell means
+        fields.append(("CELL_INTERPRETATION", "A brief description of what a given cell in the matrix represents (i.e. how to interpret the value at a given a row/column pair)."))
 
-    prompt = get_data_card_prompt(fields, data, data_doc)
+    prompt = get_data_card_prompt(fields, data_doc, dataset_name, doc_name)
     match = get_gpt4_match(prompt, gpt_key, model=model)
     print(match)
 
     results = OrderedDict([(f[0], "UNKNOWN") for f in fields])
-    for res in match.split("\n"):
+    for res in match.splitlines():
         if res == "":
             continue
         res = res.split(":", 1)
@@ -524,37 +641,35 @@ async def construct_data_card(data, data_doc,  gpt_key='', fields=None, model="g
 
     return json.dumps(results), True
 
-async def construct_model_card(text, code,  gpt_key='', fields=None, model="gpt-3.5-turbo-16k"):
+async def construct_model_card(text, code,  gpt_key='', model="gpt-3.5-turbo-16k"):
     """
     Constructing a data card for a given dataset and its description.
     :param text: Model description (either model documentation or related paper)
     :param code: Model code
     :param gpt_key: OpenAI API key
-    :param fields: Fields to be filled in the data card
     :param model: OpenAI model to use
     :return: Data card
     """
 
-    if fields is None:
-        fields = [("DESCRIPTION",  "Short description of the model (1 sentence)."),
-                  ("AUTHOR_INST",  "Name of publishing institution."),
-                  ("AUTHOR_AUTHOR", "Name of author(s)."),
-                  ("AUTHOR_EMAIL", "Email address for the author of this model."),
-                  ("DATE",         "Date of publication of this model."),
-                  ("SCHEMA",       "Shot description of the schema of inputs and outputs of the model (1 sentence)."),
-                  ("PROVENANCE",   "Short description (1 sentence) of how the model was trained."),
-                  ("DATASET",      "Short description (1 sentence) of what dataset was used to train the model."),
-                  ("COMPLEXITY",  "The complexity of the model"),
-                  ("USAGE",        "Short description (1 sentence) of the context in which the model should be used"),
-                  ("LICENSE",      "License for this model."),
-        ]
+    fields = [("DESCRIPTION",  "Short description of the model (1 sentence)."),
+              ("AUTHOR_INST",  "Name of publishing institution."),
+              ("AUTHOR_AUTHOR", "Name of author(s)."),
+              ("AUTHOR_EMAIL", "Email address for the author of this model."),
+              ("DATE",         "Date of publication of this model."),
+              ("SCHEMA",       "Shot description of the schema of inputs and outputs of the model (1 sentence)."),
+              ("PROVENANCE",   "Short description (1 sentence) of how the model was trained."),
+              ("DATASET",      "Short description (1 sentence) of what dataset was used to train the model."),
+              ("COMPLEXITY",  "The complexity of the model"),
+              ("USAGE",        "Short description (1 sentence) of the context in which the model should be used"),
+              ("LICENSE",      "License for this model."),
+    ]
 
     prompt = get_model_card_prompt(fields, text, code)
     match = get_gpt4_match(prompt, gpt_key, model=model)
     print(match)
 
     results = OrderedDict([(f[0], "UNKNOWN") for f in fields])
-    for res in match.split("\n"):
+    for res in match.splitlines():
         if res == "":
             continue
         res = res.split(":", 1)
@@ -590,7 +705,7 @@ def select_text(lines, s, t, buffer, interactive=True):
     return ret_s
 
 def code_formula_connection(code, formulas, gpt_key):
-    flist = formulas.split("\n")
+    flist = formulas.splitlines()
     matches = []
     if flist[-1]=="":
         del flist[-1]
@@ -626,7 +741,7 @@ def vars_dataset_connection_simplified(json_str, dataset_str, gpt_key):
         prompt = get_var_dataset_prompt_simplified(all_desc, dataset_str)
         print(prompt)
         ans = get_gpt4_match(prompt, gpt_key, model="gpt-3.5-turbo-16k")
-        ans = ans.split('\n')
+        ans = ans.splitlines()
         print(ans)
         for item in ans:
             toks = item.split(": ")
@@ -669,7 +784,7 @@ def vars_dataset_connection(json_str, dataset_str, gpt_key):
     vs_data = {}
 
     dataset_s = ""
-    datasets = dataset_str.split("\n")
+    datasets = dataset_str.splitlines()
     dataset_name_dict = {}
     i = 0
     for d in tqdm(datasets):
@@ -688,7 +803,7 @@ def vars_dataset_connection(json_str, dataset_str, gpt_key):
             prompt = get_var_dataset_prompt(all_desc, dataset_s, all_desc_ls[i])
             print(prompt)
             ans = get_gpt4_match(prompt, gpt_key, model="gpt-3.5-turbo")
-            ans = ans.split('\n')
+            ans = ans.splitlines()
             print(ans)
             for j in range(len(ans)):
                 toks = ans[j].split("___")
@@ -747,7 +862,7 @@ def vars_formula_connection(json_str, formula, gpt_key):
         for latex_var in tqdm(latex_vars):
             prompt = get_all_desc_formula_prompt(all_desc, latex_var)
             ans = get_gpt_match(prompt, gpt_key, model="text-davinci-003")
-            ans = ans.split('\n')
+            ans = ans.splitlines()
 
             matches = []
             for a in ans:
@@ -811,6 +926,40 @@ def code_dkg_connection(dkg_targets, gpt_key, ontology_terms=DEFAULT_TERMS, onto
 
     print(connection)
     return connection
+
+
+def _is_numeric(s):
+    try:
+        locale.atof(s)
+        return True
+    except ValueError:
+        return False
+
+def process_data(data: List[List[Any]]) -> List[List[Any]]:
+    """
+    Convert all numeric values in a dataset to floats, casting empty strings to NaNs.
+    :param data: Dataset as a list of lists
+    :return: Dataset with all numeric values converted to floats
+    """
+    def f(x):
+        if x == '':
+            return float('nan')
+        elif _is_numeric(x):
+            return locale.atof(x)
+        else:
+            return x
+
+    return [[f(x) for x in row] for row in data]
+
+
+def get_dataset_type(first_row: List[Any]) -> str:
+    if all([_is_numeric(s) for s in first_row]):
+        return 'matrix'
+    elif any([_is_numeric(s) for s in first_row]):
+        return 'no-header'
+    else:
+        return 'header-0'
+
 
 if __name__ == "__main__":
 
