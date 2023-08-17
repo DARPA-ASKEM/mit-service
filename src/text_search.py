@@ -2,8 +2,12 @@ from gpt_interaction import *
 from openai import OpenAIError
 from connect import *
 import argparse
-from gpt_key import *
 from mira_dkg_interface import *
+
+import os
+import gpt_key
+# Check if the environment variable exists and use it if it does
+GPT_KEY = os.environ.get("GPT_KEY", gpt_key.GPT_KEY)
 
 MAX_TEXT_MATCHES = 2
 MAX_DKG_MATCHES = 2
