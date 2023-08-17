@@ -12,7 +12,7 @@ from text_search import text_var_search, vars_dedup, vars_to_json, avars_to_json
 import os
 import gpt_key
 # Check if the environment variable exists and use it if it does
-GPT_KEY = os.environ.get("GPT_KEY", gpt_key.GPT_KEY)
+GPT_KEY = os.environ.get("GPT_KEY", getattr(gpt_key, 'GPT_KEY', None))
 
 PARAM = "/Users/chunwei/research/mitaskem/resources/xDD/params/"
 API_ROOT = "http://0.0.0.0:8000/"
