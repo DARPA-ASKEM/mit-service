@@ -1,10 +1,12 @@
 import argparse
 import json
 from langchain.document_loaders import PyPDFLoader
-
-from gpt_key import GPT_KEY
 from text_search import text_param_search, text_var_search
 
+import os
+import gpt_key
+# Check if the environment variable exists and use it if it does
+GPT_KEY = os.environ.get("GPT_KEY", gpt_key.GPT_KEY)
 
 def extract_paper_info(input_json_file, output_json_file):
     with open(input_json_file, 'r') as file:
