@@ -4,12 +4,15 @@ from pathlib import Path
 
 from askem_extractions.importers import import_mit
 
-import gpt_key
 from connect import get_mit_arizona_var_prompt, get_gpt4_match, vars_dataset_connection_simplified
 from dataset_id import modify_dataset
 from ensemble.ensemble import load_paper_info, extract_variables, extract_vars
-from gpt_key import *
 from text_search import text_var_search, vars_dedup, vars_to_json, avars_to_json
+
+import os
+import gpt_key
+# Check if the environment variable exists and use it if it does
+GPT_KEY = os.environ.get("GPT_KEY", gpt_key.GPT_KEY)
 
 PARAM = "/Users/chunwei/research/mitaskem/resources/xDD/params/"
 API_ROOT = "http://0.0.0.0:8000/"

@@ -13,3 +13,4 @@ src/pyacset_gen/__pycache__/
 /demos/2023-02-01/gpt_key.py
 /resources/xDD/arizona-extraction/
 *.pyc
+.idea

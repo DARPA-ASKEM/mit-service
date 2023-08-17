@@ -17,7 +17,12 @@ import sys
 from util import *
 from gpt_interaction import *
 from mira_dkg_interface import *
-from gpt_key import *
+
+import os
+import gpt_key
+# Check if the environment variable exists and use it if it does
+GPT_KEY = os.environ.get("GPT_KEY", gpt_key.GPT_KEY)
+
 # from automates.program_analysis.JSON2GroMEt.json2gromet import json_to_gromet
 # from automates.gromet.query import query
 
