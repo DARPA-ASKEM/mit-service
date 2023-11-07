@@ -1,7 +1,7 @@
 import os
 import openai
 
-def get_gpt_match(prompt, key, model="text-davinci-002"):
+def get_gpt_match(prompt, key, model="gpt-4-1106-preview"):
     # mykey = b'Z1QFxceGL_s6karbgfNFyuOdQ__m5TfHR7kuLPJChgs='
     # enc = b'gAAAAABjRh0iNbsVb6_DKSHPmlg3jc4svMDEmKuYd-DcoTxEbESYI9F8tm8anjbsTsZYHz_avZudJDBdOXSHYZqKmhdoBcJd919hCffSMg6WFYP12hpvI7EeNppGFNoZsLGnDM5d6AOUeRVeIc2FbmB_j0vvcIwuEQ=='
     # fernet = Fernet(mykey)
