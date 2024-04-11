@@ -16,5 +16,4 @@ src/pyacset_gen/__pycache__/
 .ipynb_checkpoints
 __pycache__
 *.egg-info
-gpt_key.py
 *.pyc
